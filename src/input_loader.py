@@ -1,36 +1,18 @@
 from pathlib import Path
 import cv2
-import fitz
 import numpy as np
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
+
+def load_image(path: Path) -> np.ndarray:
+    path = Path(path)
+    # imdecode handles Windows paths/non-ASCII filenames better than cv2.imread.
+    data = np.fromfile(str(path), dtype=np.uint8)
+    image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError(f"Could not open image: {path}")
+    return image
 
 
-def load_pages(path: str, dpi: int = 200):
-    """Return a list of BGR page images from a PDF or image file."""
-    p = Path(path)
-    suffix = p.suffix.lower()
-
-    if suffix == ".pdf":
-        doc = fitz.open(path)
-        scale = dpi / 72.0
-        matrix = fitz.Matrix(scale, scale)
-        pages = []
-        for page in doc:
-            pix = page.get_pixmap(matrix=matrix, alpha=False)
-            arr = np.frombuffer(pix.samples, dtype=np.uint8)
-            arr = arr.reshape(pix.height, pix.width, pix.n)
-            if pix.n == 3:
-                bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            else:
-                bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-            pages.append(bgr)
-        return pages
-
-    if suffix in IMAGE_EXTS:
-        image = cv2.imread(path)
-        if image is None:
-            raise ValueError(f"Could not read image: {path}")
-        return [image]
-
-    raise ValueError(f"Unsupported file type: {suffix}")
+def sharpness_score(image: np.ndarray) -> float:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())

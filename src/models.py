@@ -1,27 +1,33 @@
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import List
+
 
 @dataclass
-class CardResult:
+class StudentResult:
     source_file: str
     card_index: int
-    test_type: str = ""
+    test_type: str = "UNKNOWN"
     name: str = ""
     school: str = ""
-    answers: Dict[int, str] = field(default_factory=dict)
-    needs_review: bool = False
-    note: str = ""
+    date_raw: str = ""
+    date_normalized: str = ""
+    q1: str = ""
+    q2: str = ""
+    q3: str = ""
+    q4: str = ""
+    q5: str = ""
+    ocr_confidence: float = 0.0
+    card_sharpness: float = 0.0
+    status: str = "OK"
+    notes: List[str] = field(default_factory=list)
 
-    def as_row(self) -> dict:
-        row = {
-            "source_file": self.source_file,
-            "card_index": self.card_index,
-            "test_type": self.test_type,
-            "name": self.name,
-            "school": self.school,
-        }
-        for q in range(1, 6):
-            row[f"q{q}"] = self.answers.get(q, "")
-        row["needs_review"] = "YES" if self.needs_review else "NO"
-        row["note"] = self.note
-        return row
+    def mark_review(self, reason: str) -> None:
+        self.status = "REVIEW"
+        if reason and reason not in self.notes:
+            self.notes.append(reason)
+
+    def answers(self):
+        return [self.q1, self.q2, self.q3, self.q4, self.q5]
+
+    def answer_count(self):
+        return sum(bool(x) for x in self.answers())

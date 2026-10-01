@@ -1,116 +1,131 @@
 import cv2
 import numpy as np
-from config import (
-    ANSWER_ROI, HOUGH_DP, HOUGH_MIN_DIST, HOUGH_PARAM1, HOUGH_PARAM2,
-    MIN_RADIUS, MAX_RADIUS, FILL_THRESHOLD, MIN_DARKNESS_GAP,
-    QUESTIONS, OPTIONS,
-)
-from src.sheet_splitter import crop_normalized
+from config import MIN_FILLED_RATIO, MIN_WINNER_MARGIN
+
+LETTERS = "ABCD"
 
 
-def _cluster(values, groups, tolerance):
-    """Cluster 1-D coordinates, then return group centers sorted ascending."""
+def _cluster(values, tolerance):
     values = sorted(values)
-    clusters = []
-    for v in values:
-        if not clusters or abs(v - np.mean(clusters[-1])) > tolerance:
-            clusters.append([v])
+    groups = []
+    for value in values:
+        if not groups or abs(value - np.mean(groups[-1])) > tolerance:
+            groups.append([value])
         else:
-            clusters[-1].append(v)
-    centers = [float(np.mean(c)) for c in clusters]
-    if len(centers) <= groups:
-        return centers
-    # Keep the densest groups if Hough finds noise.
-    ranked = sorted(zip(clusters, centers), key=lambda x: len(x[0]), reverse=True)[:groups]
-    return sorted(c for _, c in ranked)
+            groups[-1].append(value)
+    return [float(np.mean(g)) for g in groups]
 
 
-def _darkness(gray, x, y, r):
-    """Mean darkness inside the inner bubble, excluding most of the ring."""
-    rr = max(2, int(r * 0.55))
-    mask = np.zeros(gray.shape, dtype=np.uint8)
-    cv2.circle(mask, (int(x), int(y)), rr, 255, -1)
-    pixels = gray[mask == 255]
-    if pixels.size == 0:
-        return 0.0
-    return float(1.0 - pixels.mean() / 255.0)
+def _find_20_circles(card):
+    gray = cv2.cvtColor(card, cv2.COLOR_BGR2GRAY)
+    scale = 1200.0 / max(card.shape[:2])
+    if scale < 1.0:
+        work = cv2.resize(gray, None, fx=scale, fy=scale)
+    else:
+        work = gray
+        scale = 1.0
 
+    work = cv2.GaussianBlur(work, (5, 5), 1.1)
+    h, w = work.shape
 
-def read_answers(card, debug_path=None):
-    roi = crop_normalized(card, ANSWER_ROI)
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    gray = cv2.medianBlur(gray, 5)
+    # The answer area is in the lower ~half of each card.
+    roi_y = int(h * 0.48)
+    roi = work[roi_y:, :]
+
+    min_r = max(7, int(min(h, w) * 0.014))
+    max_r = max(min_r + 4, int(min(h, w) * 0.035))
+    min_dist = max(18, int(min(h, w) * 0.035))
 
     circles = cv2.HoughCircles(
-        gray, cv2.HOUGH_GRADIENT,
-        dp=HOUGH_DP,
-        minDist=HOUGH_MIN_DIST,
-        param1=HOUGH_PARAM1,
-        param2=HOUGH_PARAM2,
-        minRadius=MIN_RADIUS,
-        maxRadius=MAX_RADIUS,
+        roi,
+        cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=min_dist,
+        param1=100,
+        param2=24,
+        minRadius=min_r,
+        maxRadius=max_r,
     )
-
-    debug = roi.copy()
     if circles is None:
-        if debug_path:
-            cv2.imwrite(str(debug_path), debug)
-        return {}, True, "No bubbles detected"
+        return []
 
-    circles = np.round(circles[0]).astype(int)
+    raw = []
+    for x, y, r in np.round(circles[0]).astype(int):
+        y += roi_y
+        raw.append((x / scale, y / scale, r / scale))
 
-    # Expected arrangement: 5 question rows total, 4 answer columns.
-    # The printed form has Q1/Q2 on the left and Q3/Q4/Q5 on the right,
-    # so we identify rows separately inside left/right halves.
-    h, w = gray.shape
-    left = [c for c in circles if c[0] < w * 0.48]
-    right = [c for c in circles if c[0] >= w * 0.48]
+    # Keep candidates in the expected answer band and ignore registration marks.
+    H, W = card.shape[:2]
+    raw = [c for c in raw if H * 0.52 < c[1] < H * 0.91 and W * 0.04 < c[0] < W * 0.96]
 
-    def parse_block(block, q_numbers):
-        if not block:
-            return {}, True
-        xs = _cluster([c[0] for c in block], 4, tolerance=max(8, w*0.04))
-        ys = _cluster([c[1] for c in block], len(q_numbers), tolerance=max(8, h*0.08))
-        if len(xs) < 4 or len(ys) < len(q_numbers):
-            return {}, True
+    # We expect exactly 8 answer columns x 3 possible rows, but only 20 circles
+    # exist because questions 4/5 have no third row.
+    if len(raw) < 20:
+        return []
 
-        xs = xs[:4]
-        ys = ys[:len(q_numbers)]
-        out = {}
-        ambiguous = False
+    # If Hough finds extras, favor circles near the dominant radius.
+    median_r = np.median([c[2] for c in raw])
+    raw.sort(key=lambda c: abs(c[2] - median_r))
+    return raw[:20]
 
-        for q, y0 in zip(q_numbers, ys):
-            scores = []
-            matched = []
-            for x0 in xs:
-                nearest = min(block, key=lambda c: (c[0]-x0)**2 + (c[1]-y0)**2)
-                s = _darkness(gray, nearest[0], nearest[1], nearest[2])
-                scores.append(s)
-                matched.append(nearest)
 
-            order = np.argsort(scores)[::-1]
-            best_i = int(order[0])
-            best = scores[best_i]
-            second = scores[int(order[1])]
+def _dark_ratio(gray, x, y, r):
+    # Measure the inside of the circle, not the printed outline.
+    rr = max(3, int(r * 0.58))
+    x, y = int(round(x)), int(round(y))
+    y1, y2 = max(0, y-rr), min(gray.shape[0], y+rr+1)
+    x1, x2 = max(0, x-rr), min(gray.shape[1], x+rr+1)
+    patch = gray[y1:y2, x1:x2]
+    yy, xx = np.ogrid[:patch.shape[0], :patch.shape[1]]
+    cy, cx = y-y1, x-x1
+    mask = (xx-cx)**2 + (yy-cy)**2 <= rr**2
+    pixels = patch[mask]
+    if pixels.size == 0:
+        return 0.0
+    # Adaptive-ish darkness: filled pen/pencil is much darker than paper.
+    return float(np.mean(pixels < 150))
 
-            if best >= FILL_THRESHOLD and (best - second) >= MIN_DARKNESS_GAP:
-                out[q] = OPTIONS[best_i]
-            else:
-                out[q] = ""
-                ambiguous = True
 
-            for i, c in enumerate(matched):
-                cv2.circle(debug, (c[0], c[1]), c[2], (0, 255, 0) if i == best_i else (255, 0, 0), 1)
-                cv2.putText(debug, f"{scores[i]:.2f}", (c[0]-10, c[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (0,0,255), 1)
+def read_answers(card):
+    circles = _find_20_circles(card)
+    if len(circles) != 20:
+        return ["", "", "", "", ""], ["Could not reliably locate all 20 answer bubbles"]
 
-        return out, ambiguous
+    H, W = card.shape[:2]
+    xs = _cluster([c[0] for c in circles], tolerance=W * 0.035)
+    ys = _cluster([c[1] for c in circles], tolerance=H * 0.035)
 
-    a1, bad1 = parse_block(left, [1, 2])
-    a2, bad2 = parse_block(right, [3, 4, 5])
-    answers = {**a1, **a2}
-    needs_review = bad1 or bad2 or len(answers) != QUESTIONS or any(not answers.get(q) for q in range(1, QUESTIONS+1))
-    note = "Review one or more blank/ambiguous answers" if needs_review else ""
+    if len(xs) != 8 or len(ys) != 3:
+        return ["", "", "", "", ""], [f"Bubble grid ambiguous (x={len(xs)}, y={len(ys)})"]
 
-    if debug_path:
-        cv2.imwrite(str(debug_path), debug)
-    return answers, needs_review, note
+    xs = sorted(xs)
+    ys = sorted(ys)
+    gray = cv2.cvtColor(card, cv2.COLOR_BGR2GRAY)
+    median_r = float(np.median([c[2] for c in circles]))
+
+    questions = [
+        (xs[:4], ys[0]),
+        (xs[:4], ys[1]),
+        (xs[:4], ys[2]),
+        (xs[4:], ys[0]),
+        (xs[4:], ys[1]),
+    ]
+
+    answers = []
+    notes = []
+    for q_num, (qx, qy) in enumerate(questions, start=1):
+        scores = [_dark_ratio(gray, x, qy, median_r) for x in qx]
+        order = np.argsort(scores)[::-1]
+        best_i, second_i = int(order[0]), int(order[1])
+        best, second = scores[best_i], scores[second_i]
+
+        if best < MIN_FILLED_RATIO:
+            answers.append("")
+            notes.append(f"Q{q_num}: no strong filled bubble")
+        elif best - second < MIN_WINNER_MARGIN:
+            answers.append("")
+            notes.append(f"Q{q_num}: possible double/uncertain mark")
+        else:
+            answers.append(LETTERS[best_i])
+
+    return answers, notes

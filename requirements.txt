@@ -2,3 +2,6 @@ opencv-python>=4.8
 numpy>=1.24
 PyMuPDF>=1.23
 pytesseract>=0.3.10
+Pillow>=8.0
+python-dateutil>=2.9
+watchdog>=6.0

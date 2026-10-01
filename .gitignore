@@ -4,17 +4,28 @@ __pycache__/
 .venv/
 venv/
 
-# Environment / secrets
+# Environment
 .env
 .env.*
 
-# Generated output
+# Generated data
 data/*.csv
-debug/*
-*.log
+data/.processed.json
 
-# OS/editor files
-.DS_Store
-Thumbs.db
+# Student/scanned images
+images/unscanned/*
+images/done/*
+images/review/*
+images/failed/*
+
+# Keep empty folders
+!images/unscanned/.gitkeep
+!images/done/.gitkeep
+!images/review/.gitkeep
+!images/failed/.gitkeep
+
+# Editor / OS
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
